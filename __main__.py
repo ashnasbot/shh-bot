@@ -1,19 +1,21 @@
 from collections import defaultdict
 import logging
 import os
+import inspect
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 from tinydb import TinyDB, Query
 
-
 logging.basicConfig(encoding='utf-8', level=logging.INFO)
 
 load_dotenv()
 TOKEN = os.getenv("API_TOKEN")
+DEFAULT_EMOJI = "❤️"
 LAST_MESSAGE = defaultdict(lambda: None)
 WAITING_LIST = defaultdict(set)
+EMOJI_MESSAGE = defaultdict(lambda: None)
 
 db = TinyDB('store.json')
 
@@ -73,17 +75,32 @@ async def on_reaction_add(reaction, user):
     channel = reaction.message.channel
     guild = channel.guild
 
-    if not LAST_MESSAGE[guild.id]:
+    Cfg = Query()
+    botconfig = db.search(Cfg.guild == guild.id)
+    if not botconfig:
         return
+    channel_cfg = botconfig[0]
 
-    if reaction.message.id == LAST_MESSAGE[guild.id].id:
-        if str(reaction.emoji) == '🎤':
-            await reaction.remove(user)
-            await user.edit(mute = False)
-            await user.edit(deafen = False)
-            WAITING_LIST[guild.id].remove(user)
-            logging.info("Unmuted user %s on %s", user.name, channel)
-            await update_message(guild)
+    if LAST_MESSAGE[guild.id]:
+        if reaction.message.id == LAST_MESSAGE[guild.id].id:
+            if str(reaction.emoji) == channel_cfg['emoji']:
+                if user in WAITING_LIST[guild.id]:
+                    await reaction.remove(user)
+                    await user.edit(mute = False)
+                    await user.edit(deafen = False)
+                    WAITING_LIST[guild.id].remove(user)
+                    logging.info("Unmuted user %s on %s", user.name, channel)
+                    await update_message(guild)
+            return
+
+    if EMOJI_MESSAGE[guild.id]:
+        if reaction.message.id == EMOJI_MESSAGE[guild.id].id:
+            db.update({'emoji': str(reaction.emoji)}, Cfg.guild == guild.id)
+            await EMOJI_MESSAGE[guild.id].delete()
+            del EMOJI_MESSAGE[guild.id]
+            channel = reaction.message.channel 
+            await channel.send(f"Reaction set to {str(reaction.emoji)}")
+            logging.info("Set emoji to %s on '%s'", str(reaction.emoji), channel)
 
 
 async def update_message(guild, new=set()):
@@ -92,6 +109,7 @@ async def update_message(guild, new=set()):
     botconfig = db.search(Cfg.guild == guild.id)
     if not botconfig:
         return
+    channel_cfg = botconfig[0]
 
     wait_list = WAITING_LIST[guild.id]
 
@@ -101,21 +119,27 @@ async def update_message(guild, new=set()):
 
     mentions = " ".join([m.mention for m in wait_list - new])
     new_mentions = " ".join([m.mention for m in new])
-    message_channel = bot.get_channel(botconfig[0]['channel'])
+    message_channel = bot.get_channel(channel_cfg['channel'])
 
     if new_mentions:
         await rem_message(guild)
-
-        if len(wait_list) == 1:
-            LAST_MESSAGE[guild.id] = await message_channel.send(f" {new_mentions} oi m8 react with '🎤' to chat")
-        else:
-            LAST_MESSAGE[guild.id] = await message_channel.send(f" {new_mentions} oi m8's react with '🎤' to chat")
+        msg = f""" {new_mentions}
+        You entered the voice chat.
+        Welcome to {message_channel.mention} where voice/chat meet. 
+        You're currently deafened/muted.
+        Please react to this message with {channel_cfg['emoji']} to undeafen/unmute"""
+        LAST_MESSAGE[guild.id] = await message_channel.send(inspect.cleandoc(msg))
 
     if mentions:
-        if len(wait_list) == 1:
-            await LAST_MESSAGE[guild.id].edit(content=f"{new_mentions} {mentions} oi m8 react with '🎤' to chat")
-        else:
-            await LAST_MESSAGE[guild.id].edit(content=f"{new_mentions} {mentions} oi m8's react with '🎤' to chat")
+        msg=f"""{new_mentions} {mentions}
+        You entered the voice chat.
+        Welcome to {message_channel.mention} where voice/chat meet. 
+        You're currently deafened/muted.
+        Please react to this message with {channel_cfg['emoji']} to undeafen/unmute"""
+        await LAST_MESSAGE[guild.id].edit(content=inspect.cleandoc(msg))
+    
+    if LAST_MESSAGE:
+        await LAST_MESSAGE[guild.id].add_reaction(channel_cfg['emoji'])
 
 
 async def rem_message(guild):
@@ -134,9 +158,16 @@ async def rem_message(guild):
 async def here(ctx, *args):
     """ Register the channel we're to ping people at. """
     logging.info("Set shh-ing enabled in '%s' via '%s'", ctx.guild.name, ctx.channel.name)
-    guild = ctx.guild.id
     Cfg = Query()
-    db.upsert({'guild': ctx.guild.id, 'channel': ctx.channel.id}, Cfg.guild == guild)
+
+    botconfig = db.search(Cfg.guild == ctx.guild.id)
+    if botconfig:
+        channel_cfg = botconfig[0]
+        emoji = channel_cfg.get('emoji', DEFAULT_EMOJI)
+    else:
+        emoji = DEFAULT_EMOJI
+
+    db.upsert({'guild': ctx.guild.id, 'channel': ctx.channel.id, 'emoji': emoji}, Cfg.guild == ctx.guild.id)
     await ctx.channel.send(f"I'll shh! people that join voice from here in {ctx.channel.mention}")
     await ctx.message.delete()
 
@@ -158,6 +189,12 @@ async def off(ctx, *args):
     db.remove(Cfg.guild == guild.id)
     await ctx.message.delete()
     await ctx.channel.send(f"Shh! time is over")
+
+@bot.command()
+@commands.has_guild_permissions(manage_guild = True)
+async def emoji(ctx):
+    await ctx.message.delete()
+    EMOJI_MESSAGE[ctx.guild.id] = await ctx.channel.send(f"React to this message with the emoji you want to use.")
 
 
 if __name__ == "__main__":
