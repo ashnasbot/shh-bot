@@ -52,6 +52,9 @@ async def on_voice_state_update(member, before, after):
         if not db.search(Cfg.guild == guild.id):
             # We have no configuration for this guild, let them pass
             return
+        if member.bot:
+            # No use muting a bot
+            return
 
         await member.edit(mute = True)
         await member.edit(deafen = True)
